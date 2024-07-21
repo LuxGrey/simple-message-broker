@@ -1,9 +1,14 @@
 /**
- * Requirements:
- * - call pattern: smbpublish broker topic message
- * - broker is hostname or IP-address of broker
- * - cannot use wildcards
- * - terminates after sending message to broker
+ * smbpublish.c
+ *
+ * A publisher program that is compatible with the broker program smbbroker.
+ *
+ * Broker address and message contents are supplied as program call arguments
+ * in the following format:
+ * smbpublish broker topic message
+ * where broker is the host name or IP-address of the broker.
+ *
+ * After publishing the message to the broker, the program terminates.
  */
 
 #include <arpa/inet.h>
@@ -41,7 +46,7 @@ int main(int argc, char **argv) {
 
   // assert that topic does not contain the wildcard character
   if (strchr(topic, topic_wildcard) != NULL) {
-    fprintf(stderr, "Topic is not allowed to contain wildcard character %s\n",
+    fprintf(stderr, "Topic is not allowed to contain wildcard character %c\n",
             topic_wildcard);
     return 1;
   }
@@ -50,14 +55,14 @@ int main(int argc, char **argv) {
   // character
   if (strchr(topic, msg_delim) != NULL) {
     fprintf(stderr,
-            "Topic is not allowed to contain message delimiter character %s\n",
+            "Topic is not allowed to contain message delimiter character %c\n",
             msg_delim);
     return 1;
   }
   if (strchr(message, msg_delim) != NULL) {
     fprintf(
         stderr,
-        "Message is not allowed to contain message delimiter character %s\n",
+        "Message is not allowed to contain message delimiter character %c\n",
         msg_delim);
     return 1;
   }
@@ -84,7 +89,7 @@ int main(int argc, char **argv) {
   broker_addr.sin_port = htons(broker_port);
 
   // assemble message for broker
-  sprintf(buffer, "%s%s%s%s%s", method_publish, msg_delim, topic, msg_delim,
+  sprintf(buffer, "%s%c%s%c%s", method_publish, msg_delim, topic, msg_delim,
           message);
 
   // publish message to broker
