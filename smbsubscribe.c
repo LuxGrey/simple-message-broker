@@ -20,7 +20,9 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
@@ -28,11 +30,68 @@
 
 #include "smbconstants.h"
 
+// these variables are global so that the signal handler can access them
+char topic[TOPIC_LENGTH];
+struct sockaddr_in broker_addr;
+int sock_fd;
+
+/**
+ * Signal handler that unsubscribes at the broker before terminating the program
+ */
+void handle_exit(int signal) {
+  char buffer[512];
+  int nbytes, length;
+
+  // assemble message for broker
+  sprintf(buffer, "%s%s", method_unsubscribe, topic);
+
+  // unsubscribe topic at broker
+  fprintf(stderr, "Unsubscribing from topic: %s\n", buffer);
+  length = strlen(buffer);
+  nbytes = sendto(sock_fd, buffer, length, 0, (struct sockaddr *)&broker_addr,
+                  sizeof(broker_addr));
+  if (nbytes != length) {
+    perror("sendto");
+  }
+
+  close(sock_fd);
+  exit(0);
+}
+
+/**
+ * Validates the provided topic string
+ *
+ * Returns 0 if topic is valid, otherwise returns 1
+ */
+int validate_topic(const char *topic) {
+  // assert that topic is not an empty string, since that is reserved as an
+  // identifier for empty topics
+  if (strlen(topic) == 0) {
+    fprintf(stderr, "Topic is not allowed to be an empty string\n");
+    return 1;
+  }
+
+  // assert that topic is not too long to store
+  if (strlen(topic) >= TOPIC_LENGTH) {
+    fprintf(stderr, "Topic exceeds max length of %u\n", TOPIC_LENGTH);
+    return 1;
+  }
+
+  // assert that topic does not contain the message delimiter character
+  if (strchr(topic, msg_delim) != NULL) {
+    fprintf(stderr,
+            "Topic is not allowed to contain message delimiter character %c\n",
+            msg_delim);
+    return 1;
+  }
+
+  return 0;
+}
+
 int main(int argc, char **argv) {
-  char *broker, *topic;
+  char *broker;
   struct hostent *broker_hent;
-  int sock_fd;
-  struct sockaddr_in broker_addr, sender_addr;
+  struct sockaddr_in sender_addr;
   socklen_t broker_size, sender_size;
   char buffer[512];
   int nbytes, length;
@@ -46,13 +105,10 @@ int main(int argc, char **argv) {
   }
 
   broker = argv[1];
-  topic = argv[2];
+  strncpy(topic, argv[2], sizeof(topic));
 
   // assert that topic does not contain the message delimiter character
-  if (strchr(topic, msg_delim) != NULL) {
-    fprintf(stderr,
-            "Topic is not allowed to contain message delimiter character %c\n",
-            msg_delim);
+  if (validate_topic(topic)) {
     return 1;
   }
 
@@ -89,6 +145,12 @@ int main(int argc, char **argv) {
     perror("sendto");
     return 1;
   }
+
+  // register signal handlers to unsubscribe at broker if this program is
+  // terminated
+  signal(SIGINT, handle_exit);
+  signal(SIGQUIT, handle_exit);
+  signal(SIGTERM, handle_exit);
 
   // wait for messages from broker in infinite loop and print received messages
   // to stdout

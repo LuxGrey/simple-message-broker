@@ -23,10 +23,12 @@
 
 #include "smbconstants.h"
 
-#define TOPIC_LENGTH 20
 #define SUB_ADDRESSES_LENGTH 10
 #define TOPIC_SUBS_MAP_LENGTH 10
 #define INDEX_WILDCARD_TOPIC 0
+
+const char *empty_topic = "";
+const in_addr_t empty_address = INADDR_NONE;
 
 typedef struct topic_subs_struct {
   char topic[TOPIC_LENGTH];
@@ -37,6 +39,51 @@ typedef struct topic_subs_struct {
  * A map where each entry maps a single topic to multiple subscriber addresses
  */
 topic_subs topic_subs_map[TOPIC_SUBS_MAP_LENGTH];
+
+/**
+ * Determines whether the two provided address structures are identical based
+ * on their IP address and port.
+ *
+ * Returns true if the addresses are identical, otherwise returns false
+ */
+bool is_same_address(const struct sockaddr_in *addr1,
+                     const struct sockaddr_in *addr2) {
+  return addr1->sin_addr.s_addr == addr2->sin_addr.s_addr &&
+         addr1->sin_port == addr2->sin_port;
+}
+
+/**
+ * Sets the provided address structure to be recognizably empty
+ */
+void set_addr_empty(struct sockaddr_in *addr) {
+  memset((void *)addr, 0, sizeof(*addr));
+  // explicitly set s_addr to an "empty" value that can be compared against
+  // later
+  addr->sin_addr.s_addr = empty_address;
+}
+
+/**
+ * If the provided topic structure has no subscribers, reset it so that the
+ * entry is free to be used for a new topic.
+ *
+ * If the topic still has a subscribers, do nothing.
+ */
+void remove_unused_topic(topic_subs *topic_struct) {
+  int i;
+
+  // check if there is still an address subscribed to this topic
+  for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
+    if (topic_struct->sub_addresses[i].sin_addr.s_addr != empty_address) {
+      // subscriber found, exit without changing anything
+      return;
+    }
+  }
+
+  fprintf(stderr,
+          "Last subscriber was unsubscribed from topic %s, removing topic\n",
+          topic_struct->topic);
+  strcpy(topic_struct->topic, empty_topic);
+}
 
 /**
  * Attempts to find an appropriate topic subs instance for the provided topic in
@@ -126,7 +173,7 @@ int validate_topic(const char *topic, bool wildcardAllowed) {
   }
 
   // assert that topic is not too long to store
-  if (strlen(topic) > TOPIC_LENGTH) {
+  if (strlen(topic) >= TOPIC_LENGTH) {
     fprintf(stderr, "Topic exceeds max length of %u\n", TOPIC_LENGTH);
     return 1;
   }
@@ -188,7 +235,7 @@ int handle_publish(char *request, int sock_fd) {
   // forward message to subscribers of wildcard topic
   found_topic = &topic_subs_map[INDEX_WILDCARD_TOPIC];
   for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
-    if (found_topic->sub_addresses[i].sin_addr.s_addr != INADDR_NONE) {
+    if (found_topic->sub_addresses[i].sin_addr.s_addr != empty_address) {
       send_message(message, found_topic->sub_addresses[i], sock_fd);
     }
   }
@@ -202,7 +249,7 @@ int handle_publish(char *request, int sock_fd) {
 
   // forward message to subscribers of current topic
   for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
-    if (found_topic->sub_addresses[i].sin_addr.s_addr != INADDR_NONE) {
+    if (found_topic->sub_addresses[i].sin_addr.s_addr != empty_address) {
       send_message(message, found_topic->sub_addresses[i], sock_fd);
     }
   }
@@ -240,10 +287,10 @@ int handle_subscribe(char *request, const struct sockaddr_in *sub_address) {
     return 1;
   }
 
-  // check via IP address if subscriber is already subscribed to requested topic
+  // check via IP address and port if subscriber is already subscribed to
+  // requested topic
   for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
-    if (topic_struct->sub_addresses[i].sin_addr.s_addr ==
-        sub_address->sin_addr.s_addr) {
+    if (is_same_address(&topic_struct->sub_addresses[i], sub_address)) {
       fprintf(stderr, "Subscriber is already subscribed to topic %s\n", topic);
       return 0;
     }
@@ -252,7 +299,7 @@ int handle_subscribe(char *request, const struct sockaddr_in *sub_address) {
   // attempt to add new subscriber to list for requested topic,
   // do so by finding an unused address entry
   for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
-    if (topic_struct->sub_addresses[i].sin_addr.s_addr == INADDR_NONE) {
+    if (topic_struct->sub_addresses[i].sin_addr.s_addr == empty_address) {
       // copy address data of subscribing client to unused entry in map
       (*topic_struct).sub_addresses[i] = *sub_address;
       fprintf(stderr, "Subscriber registered for topic %s\n", topic);
@@ -263,6 +310,58 @@ int handle_subscribe(char *request, const struct sockaddr_in *sub_address) {
   fprintf(stderr, "No more free slots to register subscriber for topic %s\n",
           topic);
   return 1;
+}
+
+/**
+ * Handles an unsubscribe request
+ *
+ * Searches for the subscriber in the list and removes its entry if found.
+ *
+ * Returns 0 if subscriber could be unsubscribed from topic without issues,
+ * otherwise returns 1 on errors
+ */
+int handle_unsubscribe(char *request, const struct sockaddr_in *sub_address) {
+  char *topic;
+  topic_subs *topic_struct;
+  int i;
+
+  // isolate topic from subscriber message
+  // first jump over method, then get the remaining substring after the first
+  // delimiter
+  strtok(request, "!");
+  topic = strtok(NULL, "");
+
+  // validate topic
+  if (validate_topic(topic, true) != 0) {
+    return 1;
+  }
+
+  // get instance that stores subscribers for requested topic
+  topic_struct = find_topic_sub(topic);
+  if (topic_struct == NULL) {
+    fprintf(stderr, "Topic %s not found, nothing to unsubscribe from\n", topic);
+    return 0;
+  }
+
+  // search subscriber via IP address and port
+  for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
+    if (is_same_address(&topic_struct->sub_addresses[i], sub_address)) {
+      // matching address found, unregister it by resetting data of entry
+      set_addr_empty(&topic_struct->sub_addresses[i]);
+      fprintf(stderr, "Subscriber unregistered for topic %s\n", topic);
+
+      // in addition, check if the topic now has no subscribers, in which case
+      // it can be removed to make space for other topics
+      remove_unused_topic(topic_struct);
+
+      return 0;
+    }
+  }
+
+  fprintf(stderr,
+          "Subscriber was not subscribed to topic %s, nothing to unsubscribe\n",
+          topic);
+  return 0;
 }
 
 int main() {
@@ -276,13 +375,10 @@ int main() {
 
   // initialize topic subs list to be recognizably empty
   for (i = 0; i < TOPIC_SUBS_MAP_LENGTH; i++) {
-    strcpy(topic_subs_map[i].topic, "");
+    strcpy(topic_subs_map[i].topic, empty_topic);
     for (j = 0; j < SUB_ADDRESSES_LENGTH; j++) {
       current_sub_addr = &topic_subs_map[i].sub_addresses[j];
-      memset((void *)current_sub_addr, 0, sizeof(*current_sub_addr));
-      // explicitly set s_addr to an "empty" value that can be compared against
-      // later
-      current_sub_addr->sin_addr.s_addr = INADDR_NONE;
+      set_addr_empty(current_sub_addr);
     }
   }
 
@@ -327,6 +423,9 @@ int main() {
     } else if (strncmp(buffer, method_subscribe, strlen(method_subscribe)) ==
                0) {
       handle_subscribe(buffer, &client_addr);
+    } else if (strncmp(buffer, method_unsubscribe, strlen(method_subscribe)) ==
+               0) {
+      handle_unsubscribe(buffer, &client_addr);
     } else {
       fprintf(stderr, "Request contains invalid method\n");
       continue;
