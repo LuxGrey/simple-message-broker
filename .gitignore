@@ -1,0 +1,7 @@
+# ignore everything to cover extensionless binary files
+*
+
+# negate what should be version controlled
+!.gitignore
+!*.c
+!LICENSE
