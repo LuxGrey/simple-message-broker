@@ -1,20 +1,21 @@
 /**
  * smbbroker.c
  *
- * A broker program that is compatible with the publisher program smbpublisher
- * and the subscriber program smbpublisher.
+ * A message broker program that is compatible with the message publisher
+ * program smbpublisher and the message subscriber program smbpublisher
  *
- * This program does not require any arguments.
+ * Does not require any arguments
  *
- * It will run in an infinite loop, accepting message publishes from any client,
- * which will then be immediately forwarded to any subscribers that are
- * currently subscribed to the topic of that message.
+ * Runs in an infinite loop, accepting message publishes from any client
+ * Published message will be immediately forwarded to any subscribers that are
+ * currently subscribed to the topic of that message
  *
  * Allows for subscribers to subscribe to the '#' topic, which will result in
- * the broker forwarding messages of any topic to such subscribers.
+ * the broker forwarding messages of any topic to such subscribers
  */
 
 #include <netinet/in.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -58,12 +59,12 @@ topic_subs *find_topic_sub(const char *topic) {
 }
 
 /**
- * Attempts to find the provided topic in the topic subs list.
+ * Attempts to find the provided topic in the topic subs list
  *
- * If it is found, a pointer to the corresponding topic subs object is returned.
+ * If it is found, a pointer to the corresponding topic subs object is returned
  * If it is not found, a new corresponding topic subs object will be set up in
- * the list and a pointer for that object will be returned.
- * If a new object cannot be set up because the list is full, NULL is returned.
+ * the list and a pointer for that object will be returned
+ * If a new object cannot be set up because the list is full, NULL is returned
  */
 topic_subs *find_or_insert_topic_sub(const char *topic) {
   topic_subs *found_topic_struct;
@@ -77,7 +78,7 @@ topic_subs *find_or_insert_topic_sub(const char *topic) {
   // could not find suitable instance, so configure an unused one for the new
   // topic
   for (i = 0; i < TOPIC_SUBS_MAP_LENGTH; i++) {
-    if (strncmp(topic_subs_map[i].topic, "", 1) == 0) {
+    if (strlen(topic_subs_map[i].topic) == 0) {
       strcpy(topic_subs_map[i].topic, topic);
       return &topic_subs_map[i];
     }
@@ -111,17 +112,24 @@ int send_message(const char *message, struct sockaddr_in dest_addr,
   return 0;
 }
 
-int handle_publish(char *request, int sock_fd) {
-  char *topic, *message;
-  topic_subs *found_topic;
-  int i;
+/**
+ * Validates the provided topic string
+ *
+ * Returns 0 if topic is valid, otherwise returns 1
+ */
+int validate_topic(const char *topic, bool wildcardAllowed) {
+  // assert that topic is not an empty string, since that is reserved as an
+  // identifier for empty topics
+  if (strlen(topic) == 0) {
+    fprintf(stderr, "Topic is not allowed to be an empty string\n");
+    return 1;
+  }
 
-  // isolate message components
-  // first jump over method, get the topic as the next token
-  // and then use the remaining substring as message contents
-  strtok(request, "!");
-  topic = strtok(NULL, "!");
-  message = strtok(NULL, "");
+  // assert that topic is not too long to store
+  if (strlen(topic) > TOPIC_LENGTH) {
+    fprintf(stderr, "Topic exceeds max length of %u\n", TOPIC_LENGTH);
+    return 1;
+  }
 
   // assert that topic does not contain the message delimiter character
   if (strchr(topic, msg_delim) != NULL) {
@@ -131,14 +139,44 @@ int handle_publish(char *request, int sock_fd) {
     return 1;
   }
 
-  // assert that topic does not contain wildcard character
-  if (strchr(topic, topic_wildcard) != NULL) {
+  // assert that topic does not contain the wildcard character
+  if (!wildcardAllowed && strchr(topic, topic_wildcard) != NULL) {
     fprintf(stderr, "Topic is not allowed to contain wildcard character %c\n",
             topic_wildcard);
     return 1;
   }
 
-  // assert that message contents do not contain the message delimiter character
+  return 0;
+}
+
+/**
+ * Handles a publish request
+ *
+ * Forwards received message to all subscribers of the specified topic and
+ * all subscribers of the wildcard topic
+ *
+ * Returns 0 if published message could be forwarded without issues, otherwise
+ * returns 1 on errors
+ */
+int handle_publish(char *request, int sock_fd) {
+  char *topic, *message;
+  topic_subs *found_topic;
+  int i;
+
+  // isolate request components
+  // first jump over method, get the topic as the next token
+  // and then use the remaining substring as message contents
+  strtok(request, "!");
+  topic = strtok(NULL, "!");
+  message = strtok(NULL, "");
+
+  // validate topic
+  if (validate_topic(topic, false) != 0) {
+    return 1;
+  }
+
+  // validate message
+  // assert that message does not contain the message delimiter character
   if (strchr(message, msg_delim) != NULL) {
     fprintf(stderr,
             "Message is not allowed to contain message delimiter "
@@ -158,8 +196,7 @@ int handle_publish(char *request, int sock_fd) {
   // try to find list of subscribers for current topic
   found_topic = find_topic_sub(topic);
   if (found_topic == NULL) {
-    fprintf(stderr, "Topic %s has no subscribers, message will be discarded\n",
-            topic);
+    fprintf(stderr, "Topic %s has no subscribers\n", topic);
     return 0;
   }
 
@@ -173,6 +210,14 @@ int handle_publish(char *request, int sock_fd) {
   return 0;
 }
 
+/**
+ * Handles a subscribe request
+ *
+ * Registers subscriber address data as recipient for the specified topic
+ *
+ * Returns 0 if topic subscription could be stored without issues, otherwise
+ * returns 1 on errors
+ */
 int handle_subscribe(char *request, const struct sockaddr_in *sub_address) {
   char *topic;
   topic_subs *topic_struct;
@@ -184,11 +229,8 @@ int handle_subscribe(char *request, const struct sockaddr_in *sub_address) {
   strtok(request, "!");
   topic = strtok(NULL, "");
 
-  // assert that topic does not contain the message delimiter character
-  if (strchr(topic, msg_delim) != NULL) {
-    fprintf(stderr,
-            "Topic is not allowed to contain message delimiter character %c\n",
-            msg_delim);
+  // validate topic
+  if (validate_topic(topic, true) != 0) {
     return 1;
   }
 
@@ -211,9 +253,8 @@ int handle_subscribe(char *request, const struct sockaddr_in *sub_address) {
   // do so by finding an unused address entry
   for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
     if (topic_struct->sub_addresses[i].sin_addr.s_addr == INADDR_NONE) {
-      // copy address data of subscribing client to unused entry
-      memcpy((void *)&topic_struct->sub_addresses[i], (void *)&sub_address,
-             sizeof(sub_address));
+      // copy address data of subscribing client to unused entry in map
+      (*topic_struct).sub_addresses[i] = *sub_address;
       fprintf(stderr, "Subscriber registered for topic %s\n", topic);
       return 0;
     }
@@ -274,11 +315,11 @@ int main() {
     nbytes = recvfrom(sock_fd, buffer, sizeof(buffer) - 1, 0,
                       (struct sockaddr *)&client_addr, &client_size);
     if (nbytes < 0) {
-      fprintf(stderr, "Failed to receive message\n");
+      fprintf(stderr, "Failed to receive request\n");
       continue;
     }
     buffer[nbytes] = '\0';
-    printf("Received message:\n%s\n", buffer);
+    printf("Received request:\n%s\n", buffer);
 
     // identify method and proceed to appropriate logic
     if (strncmp(buffer, method_publish, strlen(method_publish)) == 0) {
@@ -287,7 +328,7 @@ int main() {
                0) {
       handle_subscribe(buffer, &client_addr);
     } else {
-      fprintf(stderr, "Message contains invalid method\n");
+      fprintf(stderr, "Request contains invalid method\n");
       continue;
     }
   }

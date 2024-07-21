@@ -1,14 +1,15 @@
 /**
  * smbpublish.c
  *
- * A publisher program that is compatible with the broker program smbbroker.
+ * A publisher program that is compatible with the message broker program
+ * smbbroker
  *
  * Broker address and message contents are supplied as program call arguments
  * in the following format:
  * smbpublish broker topic message
- * where broker is the host name or IP-address of the broker.
+ * where broker is the host name or IP-address of the broker
  *
- * After publishing the message to the broker, the program terminates.
+ * After publishing the message to the broker, the program terminates
  */
 
 #include <arpa/inet.h>

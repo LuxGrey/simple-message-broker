@@ -1,7 +1,8 @@
 /**
  * smbsubscribe.c
  *
- * A subscriber program that is compatible with the broker program smbbroker.
+ * A subscriber program that is compatible with the message broker program
+ * smbbroker
  *
  * Broker address and a single topic to subscribe to are supplied as program
  * call arguments in the following format:
@@ -10,7 +11,10 @@
  *
  * After subscribing to the specified topic at the broker, the program
  * will run in an endless loop, waiting to receive messages from the broker,
- * which it will then print to stdout.
+ * which it will then print to stdout
+ *
+ * When the wildcard topic '#' is subscribed to, the subscriber will receive
+ * messages for all topics
  */
 
 #include <arpa/inet.h>
