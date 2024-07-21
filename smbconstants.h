@@ -7,6 +7,7 @@
 #define _SMBCONSTANTS_H_
 
 static const int broker_port = 8080;
+static const int subscriber_port = 8081;
 /**
  * Delimiter character that is to be used to separate different sections
  * of a message that is sent to a broker

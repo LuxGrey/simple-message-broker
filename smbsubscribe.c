@@ -90,7 +90,7 @@ int main(int argc, char **argv) {
   // to stdout
   while (1) {
     nbytes = recvfrom(sock_fd, buffer, sizeof(buffer) - 1, 0,
-                      (struct sockaddr *)&broker_addr, &broker_size);
+                      (struct sockaddr *)&sender_addr, &sender_size);
     if (nbytes < 0) {
       perror("recvfrom");
       return 1;

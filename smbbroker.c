@@ -33,20 +33,12 @@ typedef struct topic_subs_struct {
 
 topic_subs topic_subs_list[TOPIC_SUBS_SIZE];
 
-int handle_publish(const char *message) {
-  // TODO implement
-  return 0;
-}
-
 /**
- * Attempts to find the provided topic in the topics subs list.
+ * Attempts to find the provided topic in the topic subs list
  *
- * If it is found, a pointer to the corresponding topic subs object is returned.
- * If it is not found, a new corresponding topic subs object will be set up in
- * the list and a pointer for that object will be returned.
- * If a new object cannot be set up because the list is full, NULL is returned.
+ * Returns a pointer to the found object or NULL if none could be found.
  */
-topic_subs *find_or_insert_topic_sub(const char *topic) {
+topic_subs *find_topic_sub(const char *topic) {
   int i;
 
   // attempt to find corresponding topic subs objects in list
@@ -57,7 +49,108 @@ topic_subs *find_or_insert_topic_sub(const char *topic) {
     }
   }
 
-  // could not find object, so initialize one for the topic
+  return NULL;
+}
+
+/**
+ * Sends the provided message to the provided IP address.
+ *
+ * Returns 0 if message was sent without issues, otherwise returns 1 on error.
+ */
+int send_message(int broker_fd, in_addr_t dest_ip_addr, const char *message) {
+  struct sockaddr_in dest_addr;
+  socklen_t dest_size;
+  int length, nbytes;
+
+  dest_size = sizeof(dest_addr);
+  memset((void *)&dest_addr, 0, dest_size);
+  dest_addr.sin_family = AF_INET;
+  dest_addr.sin_addr.s_addr = dest_ip_addr;
+  dest_addr.sin_port = htons(subscriber_port);
+
+  length = strlen(message);
+  nbytes = sendto(broker_fd, message, length, 0, (struct sockaddr *)&dest_addr,
+                  dest_size);
+  if (nbytes != length) {
+    perror("sendto");
+    return 1;
+  }
+
+  return 0;
+}
+
+int handle_publish(int broker_fd, char *message) {
+  char *topic, *message_contents;
+  topic_subs *found_topic;
+  int i;
+
+  // isolate message components
+  // first jump over method, get the topic as the next token
+  // and then use the remaining substring as message contents
+  strtok(message, "!");
+  topic = strtok(NULL, "!");
+  message_contents = strtok(NULL, "");
+
+  // assert that topic does not contain the message delimiter character
+  if (strchr(topic, msg_delim) != NULL) {
+    fprintf(stderr,
+            "Topic is not allowed to contain message delimiter character %c\n",
+            msg_delim);
+    return 1;
+  }
+
+  // assert that topic does not contain wildcard character
+  if (strchr(topic, topic_wildcard) != NULL) {
+    fprintf(stderr, "Topic is not allowed to contain wildcard character %c\n",
+            topic_wildcard);
+    return 1;
+  }
+
+  // assert that message contents do not contain the message delimiter character
+  if (strchr(message_contents, msg_delim) != NULL) {
+    fprintf(stderr,
+            "Message contents are not allowed to contain message delimiter "
+            "character %c\n",
+            msg_delim);
+    return 1;
+  }
+
+  // try to find list of subscribers for topic
+  found_topic = find_topic_sub(topic);
+  if (found_topic == NULL) {
+    fprintf(stderr, "Topic %s has no subscribers, message will be discarded\n",
+            topic);
+    return 0;
+  }
+
+  // forward message to subscribers
+  for (i = 0; i < TOPIC_SUBS_SIZE; i++) {
+    if (found_topic->sub_addr[i] != 0) {
+      send_message(broker_fd, found_topic->sub_addr[i], message_contents);
+    }
+  }
+
+  return 0;
+}
+
+/**
+ * Attempts to find the provided topic in the topic subs list.
+ *
+ * If it is found, a pointer to the corresponding topic subs object is returned.
+ * If it is not found, a new corresponding topic subs object will be set up in
+ * the list and a pointer for that object will be returned.
+ * If a new object cannot be set up because the list is full, NULL is returned.
+ */
+topic_subs *find_or_insert_topic_sub(const char *topic) {
+  topic_subs *found_topic;
+  int i;
+
+  // attempt to find corresponding topic subs objects in list
+  if ((found_topic = find_topic_sub(topic)) != NULL) {
+    return found_topic;
+  }
+
+  // could not find suitable object, so configure one for the new topic,
   // do this by searching for a free space
   for (i = 0; i < TOPIC_SUBS_SIZE; i++) {
     if (strncmp(topic_subs_list[i].topic, "", 1) == 0) {
@@ -169,7 +262,7 @@ int main(int argc, char **argv) {
 
     // identify method and proceed to appropriate logic
     if (strncmp(buffer, method_publish, strlen(method_publish)) == 0) {
-      handle_publish(buffer);
+      handle_publish(broker_fd, buffer);
     } else if (strncmp(buffer, method_subscribe, strlen(method_subscribe)) ==
                0) {
       handle_subscribe(buffer, client_addr.sin_addr.s_addr);
