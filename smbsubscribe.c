@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
   broker_addr.sin_port = htons(broker_port);
 
   // assemble message for broker
-  sprintf(buffer, "%s%c%s", method_subscribe, msg_delim, topic);
+  sprintf(buffer, "%s%s", method_subscribe, topic);
 
   // subscribe to topic at broker
   fprintf(stderr, "Subscribing to topic: %s\n", buffer);

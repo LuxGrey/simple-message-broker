@@ -89,8 +89,7 @@ int main(int argc, char **argv) {
   broker_addr.sin_port = htons(broker_port);
 
   // assemble message for broker
-  sprintf(buffer, "%s%c%s%c%s", method_publish, msg_delim, topic, msg_delim,
-          message);
+  sprintf(buffer, "%s%s%c%s", method_publish, topic, msg_delim, message);
 
   // publish message to broker
   fprintf(stderr, "Publishing message: %s\n", buffer);
