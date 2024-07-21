@@ -14,5 +14,6 @@ static const int broker_port = 8080;
 static const char msg_delim = '!';
 static const char topic_wildcard = '#';
 static const char *method_publish = "PUB";
+static const char *method_subscribe = "SUB";
 
 #endif
