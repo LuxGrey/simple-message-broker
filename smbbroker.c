@@ -22,30 +22,35 @@
 
 #include "smbconstants.h"
 
-#define TOPIC_SIZE 20
-#define SUB_ADDR_SIZE 10
-#define TOPIC_SUBS_SIZE 10
+#define TOPIC_LENGTH 20
+#define SUB_ADDRESSES_LENGTH 10
+#define TOPIC_SUBS_MAP_LENGTH 10
+#define INDEX_WILDCARD_TOPIC 0
 
 typedef struct topic_subs_struct {
-  char topic[TOPIC_SIZE];
-  in_addr_t sub_addr[SUB_ADDR_SIZE];
+  char topic[TOPIC_LENGTH];
+  struct sockaddr_in sub_addresses[SUB_ADDRESSES_LENGTH];
 } topic_subs;
 
-topic_subs topic_subs_list[TOPIC_SUBS_SIZE];
+/**
+ * A map where each entry maps a single topic to multiple subscriber addresses
+ */
+topic_subs topic_subs_map[TOPIC_SUBS_MAP_LENGTH];
 
 /**
- * Attempts to find the provided topic in the topic subs list
+ * Attempts to find an appropriate topic subs instance for the provided topic in
+ * the topic subs list
  *
- * Returns a pointer to the found object or NULL if none could be found.
+ * Returns a pointer to the found instance or NULL if none could be found
  */
 topic_subs *find_topic_sub(const char *topic) {
   int i;
 
-  // attempt to find corresponding topic subs objects in list
-  for (i = 0; i < TOPIC_SUBS_SIZE; i++) {
-    if (strncmp(topic_subs_list[i].topic, topic, sizeof(topic)) == 0) {
-      // object found, return pointer
-      return &topic_subs_list[i];
+  // attempt to find corresponding topic subs instance in list
+  for (i = 0; i < TOPIC_SUBS_MAP_LENGTH; i++) {
+    if (strncmp(topic_subs_map[i].topic, topic, sizeof(topic)) == 0) {
+      // instance found, return pointer
+      return &topic_subs_map[i];
     }
   }
 
@@ -53,23 +58,50 @@ topic_subs *find_topic_sub(const char *topic) {
 }
 
 /**
- * Sends the provided message to the provided IP address.
+ * Attempts to find the provided topic in the topic subs list.
+ *
+ * If it is found, a pointer to the corresponding topic subs object is returned.
+ * If it is not found, a new corresponding topic subs object will be set up in
+ * the list and a pointer for that object will be returned.
+ * If a new object cannot be set up because the list is full, NULL is returned.
+ */
+topic_subs *find_or_insert_topic_sub(const char *topic) {
+  topic_subs *found_topic_struct;
+  int i;
+
+  // attempt to find corresponding topic subs instance in list
+  if ((found_topic_struct = find_topic_sub(topic)) != NULL) {
+    return found_topic_struct;
+  }
+
+  // could not find suitable instance, so configure an unused one for the new
+  // topic
+  for (i = 0; i < TOPIC_SUBS_MAP_LENGTH; i++) {
+    if (strncmp(topic_subs_map[i].topic, "", 1) == 0) {
+      strcpy(topic_subs_map[i].topic, topic);
+      return &topic_subs_map[i];
+    }
+  }
+
+  // no unused instance remaining for the new topic
+  fprintf(stderr, "No more free slots to register new topic %s\n", topic);
+  return NULL;
+}
+
+/**
+ * Sends the provided message to the provided address
  *
  * Returns 0 if message was sent without issues, otherwise returns 1 on error.
  */
-int send_message(int broker_fd, in_addr_t dest_ip_addr, const char *message) {
-  struct sockaddr_in dest_addr;
+int send_message(const char *message, struct sockaddr_in dest_addr,
+                 int sock_fd) {
   socklen_t dest_size;
   int length, nbytes;
 
   dest_size = sizeof(dest_addr);
-  memset((void *)&dest_addr, 0, dest_size);
-  dest_addr.sin_family = AF_INET;
-  dest_addr.sin_addr.s_addr = dest_ip_addr;
-  dest_addr.sin_port = htons(subscriber_port);
 
   length = strlen(message);
-  nbytes = sendto(broker_fd, message, length, 0, (struct sockaddr *)&dest_addr,
+  nbytes = sendto(sock_fd, message, length, 0, (struct sockaddr *)&dest_addr,
                   dest_size);
   if (nbytes != length) {
     perror("sendto");
@@ -79,17 +111,17 @@ int send_message(int broker_fd, in_addr_t dest_ip_addr, const char *message) {
   return 0;
 }
 
-int handle_publish(int broker_fd, char *message) {
-  char *topic, *message_contents;
+int handle_publish(char *request, int sock_fd) {
+  char *topic, *message;
   topic_subs *found_topic;
   int i;
 
   // isolate message components
   // first jump over method, get the topic as the next token
   // and then use the remaining substring as message contents
-  strtok(message, "!");
+  strtok(request, "!");
   topic = strtok(NULL, "!");
-  message_contents = strtok(NULL, "");
+  message = strtok(NULL, "");
 
   // assert that topic does not contain the message delimiter character
   if (strchr(topic, msg_delim) != NULL) {
@@ -107,15 +139,23 @@ int handle_publish(int broker_fd, char *message) {
   }
 
   // assert that message contents do not contain the message delimiter character
-  if (strchr(message_contents, msg_delim) != NULL) {
+  if (strchr(message, msg_delim) != NULL) {
     fprintf(stderr,
-            "Message contents are not allowed to contain message delimiter "
+            "Message is not allowed to contain message delimiter "
             "character %c\n",
             msg_delim);
     return 1;
   }
 
-  // try to find list of subscribers for topic
+  // forward message to subscribers of wildcard topic
+  found_topic = &topic_subs_map[INDEX_WILDCARD_TOPIC];
+  for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
+    if (found_topic->sub_addresses[i].sin_addr.s_addr != INADDR_NONE) {
+      send_message(message, found_topic->sub_addresses[i], sock_fd);
+    }
+  }
+
+  // try to find list of subscribers for current topic
   found_topic = find_topic_sub(topic);
   if (found_topic == NULL) {
     fprintf(stderr, "Topic %s has no subscribers, message will be discarded\n",
@@ -123,55 +163,25 @@ int handle_publish(int broker_fd, char *message) {
     return 0;
   }
 
-  // forward message to subscribers
-  for (i = 0; i < TOPIC_SUBS_SIZE; i++) {
-    if (found_topic->sub_addr[i] != 0) {
-      send_message(broker_fd, found_topic->sub_addr[i], message_contents);
+  // forward message to subscribers of current topic
+  for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
+    if (found_topic->sub_addresses[i].sin_addr.s_addr != INADDR_NONE) {
+      send_message(message, found_topic->sub_addresses[i], sock_fd);
     }
   }
 
   return 0;
 }
 
-/**
- * Attempts to find the provided topic in the topic subs list.
- *
- * If it is found, a pointer to the corresponding topic subs object is returned.
- * If it is not found, a new corresponding topic subs object will be set up in
- * the list and a pointer for that object will be returned.
- * If a new object cannot be set up because the list is full, NULL is returned.
- */
-topic_subs *find_or_insert_topic_sub(const char *topic) {
-  topic_subs *found_topic;
-  int i;
-
-  // attempt to find corresponding topic subs objects in list
-  if ((found_topic = find_topic_sub(topic)) != NULL) {
-    return found_topic;
-  }
-
-  // could not find suitable object, so configure one for the new topic,
-  // do this by searching for a free space
-  for (i = 0; i < TOPIC_SUBS_SIZE; i++) {
-    if (strncmp(topic_subs_list[i].topic, "", 1) == 0) {
-      strcpy(topic_subs_list[i].topic, topic);
-      return &topic_subs_list[i];
-    }
-  }
-
-  // no remaining space to initialize object for new topic
-  return NULL;
-}
-
-int handle_subscribe(char *message, const in_addr_t sub_address) {
+int handle_subscribe(char *request, const struct sockaddr_in *sub_address) {
   char *topic;
-  topic_subs *topic_to_sub;
+  topic_subs *topic_struct;
   int i;
 
   // isolate topic from subscriber message
   // first jump over method, then get the remaining substring after the first
   // delimiter
-  strtok(message, "!");
+  strtok(request, "!");
   topic = strtok(NULL, "");
 
   // assert that topic does not contain the message delimiter character
@@ -182,37 +192,41 @@ int handle_subscribe(char *message, const in_addr_t sub_address) {
     return 1;
   }
 
-  // find object that stores subscribers for requested topic
-  topic_to_sub = find_or_insert_topic_sub(topic);
-  if (topic_to_sub == NULL) {
-    fprintf(stderr, "No more free slots to register new topic %s\n", topic);
+  // get instance that stores subscribers for requested topic
+  topic_struct = find_or_insert_topic_sub(topic);
+  if (topic_struct == NULL) {
     return 1;
   }
 
-  // check if subscriber is already subscribed to requested topic
-  for (i = 0; i < SUB_ADDR_SIZE; i++) {
-    if (topic_to_sub->sub_addr[i] == sub_address) {
+  // check via IP address if subscriber is already subscribed to requested topic
+  for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
+    if (topic_struct->sub_addresses[i].sin_addr.s_addr ==
+        sub_address->sin_addr.s_addr) {
       fprintf(stderr, "Subscriber is already subscribed to topic %s\n", topic);
       return 0;
     }
   }
 
-  // attempt to add new subscriber to list for requested topic
-  for (i = 0; i < SUB_ADDR_SIZE; i++) {
-    if (topic_to_sub->sub_addr[i] == 0) {
-      topic_to_sub->sub_addr[i] = sub_address;
+  // attempt to add new subscriber to list for requested topic,
+  // do so by finding an unused address entry
+  for (i = 0; i < SUB_ADDRESSES_LENGTH; i++) {
+    if (topic_struct->sub_addresses[i].sin_addr.s_addr == INADDR_NONE) {
+      // copy address data of subscribing client to unused entry
+      memcpy((void *)&topic_struct->sub_addresses[i], (void *)&sub_address,
+             sizeof(sub_address));
       fprintf(stderr, "Subscriber registered for topic %s\n", topic);
       return 0;
     }
   }
 
-  fprintf(stderr, "No more fee slots to register subscriber for topic %s\n",
+  fprintf(stderr, "No more free slots to register subscriber for topic %s\n",
           topic);
   return 1;
 }
 
-int main(int argc, char **argv) {
-  int broker_fd;
+int main() {
+  struct sockaddr_in *current_sub_addr;
+  int sock_fd;
   struct sockaddr_in broker_addr, client_addr;
   socklen_t broker_size, client_size;
   char buffer[512];
@@ -220,17 +234,23 @@ int main(int argc, char **argv) {
   char *method;
 
   // initialize topic subs list to be recognizably empty
-  for (i = 0; i < TOPIC_SUBS_SIZE; i++) {
-    strcpy(topic_subs_list[i].topic, "");
-    for (j = 0; j < SUB_ADDR_SIZE; j++) {
-      topic_subs_list[i].sub_addr[j] = 0;
+  for (i = 0; i < TOPIC_SUBS_MAP_LENGTH; i++) {
+    strcpy(topic_subs_map[i].topic, "");
+    for (j = 0; j < SUB_ADDRESSES_LENGTH; j++) {
+      current_sub_addr = &topic_subs_map[i].sub_addresses[j];
+      memset((void *)current_sub_addr, 0, sizeof(*current_sub_addr));
+      // explicitly set s_addr to an "empty" value that can be compared against
+      // later
+      current_sub_addr->sin_addr.s_addr = INADDR_NONE;
     }
   }
-  // topic_subs_list[0].topic = "#";
+
+  // already configure wildcard topic to ensure that it is always available
+  strcpy(topic_subs_map[INDEX_WILDCARD_TOPIC].topic, "#");
 
   // create UPD socket
-  broker_fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (broker_fd < 0) {
+  sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (sock_fd < 0) {
     perror("socket");
     return 1;
   }
@@ -243,15 +263,15 @@ int main(int argc, char **argv) {
   broker_addr.sin_port = htons(broker_port);
 
   // bind address structure to socket
-  bind(broker_fd, (struct sockaddr *)&broker_addr, broker_size);
+  bind(sock_fd, (struct sockaddr *)&broker_addr, broker_size);
 
-  fprintf(stderr, "Listening on port %u\n", broker_port);
+  fprintf(stderr, "Broker listening on port %u\n", broker_port);
 
   // receive and forward messages in infinite loop
   while (1) {
     // receive message
     client_size = sizeof(client_addr);
-    nbytes = recvfrom(broker_fd, buffer, sizeof(buffer) - 1, 0,
+    nbytes = recvfrom(sock_fd, buffer, sizeof(buffer) - 1, 0,
                       (struct sockaddr *)&client_addr, &client_size);
     if (nbytes < 0) {
       fprintf(stderr, "Failed to receive message\n");
@@ -262,10 +282,10 @@ int main(int argc, char **argv) {
 
     // identify method and proceed to appropriate logic
     if (strncmp(buffer, method_publish, strlen(method_publish)) == 0) {
-      handle_publish(broker_fd, buffer);
+      handle_publish(buffer, sock_fd);
     } else if (strncmp(buffer, method_subscribe, strlen(method_subscribe)) ==
                0) {
-      handle_subscribe(buffer, client_addr.sin_addr.s_addr);
+      handle_subscribe(buffer, &client_addr);
     } else {
       fprintf(stderr, "Message contains invalid method\n");
       continue;
