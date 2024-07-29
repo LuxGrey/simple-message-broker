@@ -4,5 +4,6 @@
 # negate what should be version controlled
 !.gitignore
 !*.c
+!*.h
 !LICENSE
 !*.md
